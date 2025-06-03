@@ -3,14 +3,16 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const { spawn } = require('child_process');
 const uploadCsvRoute = require("./uploadCsvRoute");
+const getUploadedCSV = require("./getUploadedCSV")
 const { uploadScreenshot } = require('./utils/uploadScreenshot');
 const { Parser } = require('json2csv'); 
+const fs = require('fs');
 
 const app = express();
 const PORT = 5001;
 
 app.use(cors({
-  origin: 'http://localhost:3001',  
+  origin: ['http://localhost:3000', 'https://selenium-automation.vercel.app/'],  
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   credentials: true
@@ -21,48 +23,125 @@ app.options('/*', cors());
 app.use(express.json());
 const registrationResults = [];
 app.use("/api", uploadCsvRoute);
+app.use("/api", getUploadedCSV);
 
-app.post('/api/batch-register', (req, res) => {
+
+
+const MAX_RETRIES = 3;
+
+function runPythonScript(blobName) {
+  return new Promise((resolve, reject) => {
+    const pythonProcess = spawn(
+      '/Users/aryamansaxena/Desktop/Projects/User_Registration_Automation/Automation_Scripts/venv/bin/python',
+      ['../Automation_Scripts/registration_controller.py', blobName]
+    );
+
+    let output = '';
+    let error = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      output += data.toString();
+      console.log(`stdout: ${data}`);
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      error += data.toString();
+      console.error(`stderr: ${data}`);
+    });
+
+    pythonProcess.on('close', (code) => {
+      if (code === 0) {
+        const successMatch = output.match(/Success:\s*(\d+)/i);
+        const failedMatch = output.match(/Failed:\s*(\d+)/i);
+
+        const successCount = successMatch ? parseInt(successMatch[1], 10) : 0;
+        const failedCount = failedMatch ? parseInt(failedMatch[1], 10) : 0;
+
+        resolve({ successCount, failedCount, output });
+      } else {
+        reject(new Error(error || 'Python script failed to execute.'));
+      }
+    });
+  });
+}
+
+app.post('/api/batch-register', async (req, res) => {
   const { blobName } = req.body;
 
   if (!blobName) {
     return res.status(400).json({ success: false, message: 'Missing blobName' });
   }
 
-  const pythonProcess = spawn(
-    '/Users/aryamansaxena/Desktop/Projects/User_Registration_Automation/Automation_Scripts/venv/bin/python',
-    ['../Automation_Scripts/registration_controller.py', blobName]
-  );
+  let attempts = 0;
+  let finalResult = null;
 
-  let output = '';
-  let error = '';
+  while (attempts < MAX_RETRIES) {
+    try {
+      const result = await runPythonScript(blobName);
+      attempts++;
 
-  pythonProcess.stdout.on('data', (data) => {
-    output += data.toString();
-    console.log(`stdout: ${data}`);
-  });
+      const { successCount, failedCount } = result;
+      console.log(`Attempt ${attempts}: Success=${successCount}, Failed=${failedCount}`);
 
-  pythonProcess.stderr.on('data', (data) => {
-    error += data.toString();
-    console.error(`stderr: ${data}`);
-  });
-
-  pythonProcess.on('close', (code) => {
-    if (code === 0) {
-      res.status(200).json({ success: true, message: 'Registration complete.', output });
-    } else {
-      res.status(500).json({ success: false, message: 'Registration failed.', error });
+      if (successCount >= failedCount) {
+        return res.status(200).json({ success: true, message: 'Registration complete.' });
+      } else {
+        finalResult = result; // Save last attempt result
+      }
+    } catch (err) {
+      console.error(`Attempt ${attempts} failed with error:`, err.message);
+      attempts++;
     }
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: 'Registration failed after multiple attempts.',
+    lastAttempt: finalResult?.output || 'No output available'
   });
 });
 
+// app.post('/api/batch-register', (req, res) => {
+//   const { blobName } = req.body;
+
+//   if (!blobName) {
+//     return res.status(400).json({ success: false, message: 'Missing blobName' });
+//   }
+
+//   const pythonProcess = spawn(
+//     '/Users/aryamansaxena/Desktop/Projects/User_Registration_Automation/Automation_Scripts/venv/bin/python',
+//     ['../Automation_Scripts/registration_controller.py', blobName]
+//   );
+
+//   let output = '';
+//   let error = '';
+
+//   pythonProcess.stdout.on('data', (data) => {
+//     output += data.toString();
+//     console.log(`stdout: ${data}`);
+//   });
+
+//   pythonProcess.stderr.on('data', (data) => {
+//     error += data.toString();
+//     console.error(`stderr: ${data}`);
+//   });
+
+//   pythonProcess.on('close', (code) => {
+//     if (code === 0) {
+//       res.status(200).json({ success: true, message: 'Registration complete.' });
+//     } else {
+//       res.status(500).json({ success: false, message: 'Registration failed.' });
+//     }
+//   });
+// });
+
 
 app.post('/api/register', async (req, res) => {
-  const { phone, email } = req.body;
+  const { phone, email, countryCode } = req.body;
 
   const pythonProcess = spawn(
     '/Users/aryamansaxena/Desktop/Projects/User_Registration_Automation/Automation_Scripts/venv/bin/python',
-    ['../Automation_Scripts/registration_controller.py', phone, email]
+    ['../Automation_Scripts/indriverRegistration.py', phone, countryCode]
   );
 
   let stdoutData = '';
@@ -87,10 +166,13 @@ app.post('/api/register', async (req, res) => {
   });
 
   pythonProcess.on('close', async (code) => {
+    console.log('✅ Python process closed with code:', code);
+
     try {
       let screenshotUrl = null;
-
+      console.log("111", screenshotPath)
       if (screenshotPath && fs.existsSync(screenshotPath)) {
+        console.log("2222")
         screenshotUrl = await uploadScreenshot(screenshotPath);
         fs.unlinkSync(screenshotPath); // Clean up local file
       }
@@ -120,38 +202,6 @@ app.post('/api/register', async (req, res) => {
 });
 
 
-// app.post('/api/register', (req, res) => {
-//   const { phone, email } = req.body;
-
-//   // Use spawn instead of exec to get exit code
-//   const pythonProcess = spawn(
-//     '/Users/aryamansaxena/Desktop/Projects/User_Registration_Automation/Automation_Scripts/venv/bin/python',
-//     ['../Automation_Scripts/registration.py', phone, email]
-//   );
-
-//   let stdoutData = '';
-//   let stderrData = '';
-
-//   pythonProcess.stdout.on('data', (data) => {
-//     stdoutData += data.toString();
-//     console.log(`stdout: ${data}`);
-//   });
-
-//   pythonProcess.stderr.on('data', (data) => {
-//     stderrData += data.toString();
-//     console.error(`stderr: ${data}`);
-//   });
-
-//   pythonProcess.on('close', (code) => {
-//     console.log(`Python script exited with code ${code}`);
-//     if (code === 0) {
-//       res.json({ success: true, message: 'OTP screen detected. Marked as passed.', output: stdoutData });
-//     } else {
-//       res.json({ success: false, message: 'OTP screen not detected. Marked as failed.', error: stderrData || stdoutData });
-//     }
-//   });
-// });
-
 app.get('/api/report', (req, res) => {
   const fields = ['phone', 'email', 'timestamp', 'success', 'message', 'screenshotUrl'];
   const opts = { fields };
@@ -168,6 +218,7 @@ app.get('/api/report', (req, res) => {
     res.status(500).send('Failed to generate report');
   }
 });
+
 
 
 app.listen(PORT, () => {
