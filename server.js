@@ -7,10 +7,18 @@ const getUploadedCSV = require("./getUploadedCSV")
 const { uploadScreenshot } = require('./utils/uploadScreenshot');
 const { Parser } = require('json2csv'); 
 const fs = require('fs');
+const authRoutes = require('./routes/authRoutes');
+const connectDB = require('./config/db');
+const authMiddleware = require('./middleware/authMiddleware');
+const User = require('./models/userModel');
+
+// Connect to MongoDB
+connectDB();
 
 const app = express();
 const PORT = 5001;
 
+// CORS configuration
 app.use(cors({
   origin: ['http://localhost:3000', 'https://selenium-automation.vercel.app/'],  
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -18,12 +26,16 @@ app.use(cors({
   credentials: true
 }));
 
-app.options('/*', cors());
-
 app.use(express.json());
 const registrationResults = [];
 app.use("/api", uploadCsvRoute);
 app.use("/api", getUploadedCSV);
+app.use('/api/auth', authRoutes);
+
+// Protected routes
+app.use('/api/batch-register', authMiddleware);
+app.use('/api/register', authMiddleware);
+app.use('/api/report', authMiddleware);
 
 
 
@@ -219,6 +231,15 @@ app.get('/api/report', (req, res) => {
   }
 });
 
+// Test route to check users (remove in production)
+app.get('/api/test/users', async (req, res) => {
+  try {
+    const users = await User.find({}, { password: 0 }); // Exclude passwords
+    res.json({ count: users.length, users });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 
 app.listen(PORT, () => {
